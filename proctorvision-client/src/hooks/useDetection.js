@@ -7,20 +7,23 @@ const MP_WASM =
 const MP_MODEL =
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 
-export function useDetection({ videoRef, attemptId, enabled, onEvent }) {
+export function useDetection({ videoRef, attemptId, enabled, onEvent, onTerminated }) {
   const stopFlag = useRef(false);
   const lastPost = useRef({});
   const awayStart = useRef(null);
+  const terminatedRef = useRef(false); // stop posting after termination
 
   useEffect(() => {
     if (!enabled || !attemptId) return;
     stopFlag.current = false;
+    terminatedRef.current = false;
 
     let faceLandmarker, coco, faceLoopId, objLoopId;
     let lastVideoTime = -1;
 
     const cooldown = 4000; // ms per event type
     const canPost = (type) => {
+      if (terminatedRef.current) return false; // 🔴 shut down after terminate
       const now = Date.now();
       if (!lastPost.current[type] || now - lastPost.current[type] > cooldown) {
         lastPost.current[type] = now;
@@ -37,8 +40,19 @@ export function useDetection({ videoRef, attemptId, enabled, onEvent }) {
           type,
           snapshotBase64: snapshotDataUrl,
         });
-        // 🔔 notify the UI about the successfully-recorded event
+        // 🔔 notify UI of the recorded event
         onEvent?.(type, r.data);
+
+        // 🔴 auto-terminate signal from backend → stop all detection + notify
+        if (r.data?.attemptTerminated) {
+          terminatedRef.current = true;
+          stopFlag.current = true;             // freeze loops
+          clearTimeout(faceLoopId);
+          clearTimeout(objLoopId);
+          document.removeEventListener("visibilitychange", tabHandler);
+          try { faceLandmarker?.close?.(); } catch {}
+          onTerminated?.(r.data);              // 👈 hand off to TakeExam
+        }
       } catch (e) {
         console.warn("event post failed", type, e.message);
       }
@@ -91,7 +105,6 @@ export function useDetection({ videoRef, attemptId, enabled, onEvent }) {
             if (faces === 0) post("no_face", capture());
             else if (faces > 1) post("multi_face", capture());
             else {
-              // rough "looking away" via head pose from landmark 1 (nose tip) x
               const lm = res.faceLandmarks[0];
               const nose = lm[1];
               if (nose.x < 0.35 || nose.x > 0.65) {
@@ -135,5 +148,5 @@ export function useDetection({ videoRef, attemptId, enabled, onEvent }) {
       document.removeEventListener("visibilitychange", tabHandler);
       faceLandmarker?.close?.();
     };
-  }, [enabled, attemptId, videoRef, onEvent]);
+  }, [enabled, attemptId, videoRef, onEvent, onTerminated]);
 }

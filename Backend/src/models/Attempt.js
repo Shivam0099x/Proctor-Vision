@@ -7,8 +7,13 @@ const attemptSchema = new mongoose.Schema(
     startedAt: { type: Date, default: Date.now },
     endsAt: { type: Date, required: true }, // server-side authoritative end time
     submittedAt: { type: Date },
-    status: { type: String, enum: ["active", "submitted"], default: "active" },
+    status: {
+      type: String,
+      enum: ["active", "submitted", "terminated"], // 👈 added "terminated"
+      default: "active",
+    },
     riskLevel: { type: String, enum: ["low", "medium", "high"], default: "low" },
+    terminatedReason: { type: String }, // 👈 optional, for audit / teacher view
   },
   { timestamps: true }
 );

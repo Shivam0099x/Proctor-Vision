@@ -37,9 +37,25 @@ export default function TakeExam() {
   const [submitting, setSubmitting] = useState(false);
   const submittedRef = useRef(false);
 
+  // 🔴 Termination state
+  const [terminated, setTerminated] = useState(null); // { reason } | null
+
   const handleEvent = useCallback((type) => {
     setCounts((c) => ({ ...c, [type]: (c[type] || 0) + 1 }));
     setLastWarning({ type, at: Date.now() });
+  }, []);
+
+  // 🔴 Called by useDetection when backend auto-terminates
+  const handleTerminated = useCallback((data) => {
+    setTerminated({
+      reason: data?.terminatedReason || "Suspicious activity detected",
+      recentValidCount: data?.recentValidCount,
+    });
+    // Stop camera immediately
+    const stream = videoRef.current?.srcObject;
+    stream?.getTracks()?.forEach((t) => t.stop());
+    submittedRef.current = true; // prevent manual/auto submit from firing
+    setConfirmOpen(false);
   }, []);
 
   useEffect(() => {
@@ -51,6 +67,16 @@ export default function TakeExam() {
     (async () => {
       try {
         const r = await api.post(`/attempts/start/${examId}`);
+
+        // If the attempt was already terminated server-side (e.g. re-open after reload)
+        if (r.data.status === "terminated") {
+          setAttempt(r.data);
+          setTerminated({
+            reason: r.data.terminatedReason || "Suspicious activity detected",
+          });
+          return;
+        }
+
         setAttempt(r.data);
         setStatus("Camera starting...");
         setAnswers(loadAnswers(r.data._id));
@@ -78,6 +104,7 @@ export default function TakeExam() {
 
   useEffect(() => {
     if (!attempt) return;
+    if (terminated) return; // don't tick after termination
     const tick = () => {
       const left = Math.max(
         0,
@@ -90,13 +117,14 @@ export default function TakeExam() {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attempt]);
+  }, [attempt, terminated]);
 
   useDetection({
     videoRef,
     attemptId: attempt?._id,
-    enabled: !!attempt,
+    enabled: !!attempt && !terminated,
     onEvent: handleEvent,
+    onTerminated: handleTerminated,
   });
 
   const pickOption = (qId, optIdx) => {
@@ -145,6 +173,46 @@ export default function TakeExam() {
   const progressPct = Math.round(
     (answeredCount / DEMO_QUESTIONS.length) * 100
   );
+
+  // ===== 🔴 TERMINATED SCREEN =====
+  if (terminated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6 fade-in">
+        <div className="glass-strong p-8 max-w-md w-full space-y-4 float-up text-center border-red-500/40">
+          <div className="text-5xl">🚫</div>
+          <h1 className="text-2xl font-bold text-red-300">
+            Exam Terminated
+          </h1>
+          <p className="text-sm text-slate-300">
+            This session was automatically ended because a suspicious pattern
+            was detected by the system.
+          </p>
+
+          <div className="bg-red-500/10 border border-red-500/40 rounded-lg p-3 text-left text-sm space-y-1">
+            <p className="text-red-200 font-semibold">Reason</p>
+            <p className="text-red-100 text-xs">
+              {terminated.reason}
+            </p>
+            {terminated.recentValidCount != null && (
+              <p className="text-red-200/80 text-xs pt-1">
+                {terminated.recentValidCount} valid events in the last 5
+                minutes.
+              </p>
+            )}
+          </div>
+
+          <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-3 text-left text-xs text-slate-300">
+            Your responses have been saved. Your teacher will review the
+            session and make the final decision.
+          </div>
+
+          <button onClick={finishAndLeave} className="btn-danger w-full">
+            Leave Exam
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // ===== SUMMARY SCREEN =====
   if (summary) {
@@ -213,6 +281,9 @@ export default function TakeExam() {
             <li>{DEMO_QUESTIONS.length} questions, timed</li>
             <li>Answers are saved locally as you go</li>
             <li>You'll see a summary after submitting</li>
+            <li className="text-red-300">
+              ⚠️ Repeated violations may auto-terminate the exam
+            </li>
           </ul>
           <button
             onClick={() => setConsent(true)}

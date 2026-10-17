@@ -67,6 +67,24 @@ export default function ExamReview() {
 
   const totalAlarms = stats.reduce((sum, s) => sum + s.total, 0);
 
+  // 🟡 Tuning hints for the currently-selected student
+  const tuningHints = (() => {
+    if (!selected) return [];
+    const byType = {};
+    selected.events.forEach((ev) => {
+      if (!byType[ev.type]) byType[ev.type] = { total: 0, false: 0 };
+      byType[ev.type].total += 1;
+      if (ev.review === "false_alarm") byType[ev.type].false += 1;
+    });
+    return Object.entries(byType)
+      .filter(([, s]) => s.total >= 3 && s.false / s.total > 0.6)
+      .map(([type, s]) => ({
+        type,
+        label: EVENT_LABEL[type] || type,
+        falseRate: Math.round((s.false / s.total) * 100),
+      }));
+  })();
+
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-5 fade-in">
       {/* Back + header */}
@@ -117,14 +135,21 @@ export default function ExamReview() {
             </div>
           ) : (
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={stats} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+              <BarChart
+                data={stats}
+                margin={{ top: 8, right: 8, left: -16, bottom: 0 }}
+              >
                 <XAxis
                   dataKey="_id"
                   stroke="#64748b"
                   tick={{ fontSize: 12 }}
                   tickFormatter={(v) => EVENT_LABEL[v] || v}
                 />
-                <YAxis stroke="#64748b" allowDecimals={false} tick={{ fontSize: 12 }} />
+                <YAxis
+                  stroke="#64748b"
+                  allowDecimals={false}
+                  tick={{ fontSize: 12 }}
+                />
                 <Tooltip
                   cursor={{ fill: "rgba(99,102,241,0.08)" }}
                   contentStyle={{
@@ -182,35 +207,56 @@ export default function ExamReview() {
               </div>
             )}
 
-            {attempts.map((a) => (
-              <button
-                key={a._id}
-                onClick={() => openAttempt(a._id)}
-                className={`w-full text-left rounded-lg p-3 transition-all border ${
-                  selected?.attempt?._id === a._id
-                    ? "bg-indigo-500/10 border-indigo-500/60 ring-1 ring-indigo-500/40"
-                    : "bg-slate-800/50 border-slate-700/60 hover:bg-slate-800 hover:border-slate-600"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center text-xs font-bold flex-shrink-0">
-                      {a.student?.name?.[0]?.toUpperCase() || "?"}
+            {attempts.map((a) => {
+              const isTerminated = a.status === "terminated";
+              return (
+                <button
+                  key={a._id}
+                  onClick={() => openAttempt(a._id)}
+                  className={`w-full text-left rounded-lg p-3 transition-all border ${
+                    selected?.attempt?._id === a._id
+                      ? "bg-indigo-500/10 border-indigo-500/60 ring-1 ring-indigo-500/40"
+                      : isTerminated
+                      ? "bg-red-500/5 border-red-500/30 hover:bg-red-500/10 hover:border-red-500/50"
+                      : "bg-slate-800/50 border-slate-700/60 hover:bg-slate-800 hover:border-slate-600"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center text-xs font-bold flex-shrink-0">
+                        {a.student?.name?.[0]?.toUpperCase() || "?"}
+                      </div>
+                      <p className="font-semibold truncate">
+                        {a.student?.name || "Unknown"}
+                      </p>
                     </div>
-                    <p className="font-semibold truncate">
-                      {a.student?.name || "Unknown"}
-                    </p>
+
+                    {/* 🔴 TERMINATED badge takes priority over risk */}
+                    {isTerminated ? (
+                      <span className="badge bg-red-500/20 text-red-300 border-red-500/50">
+                        🚫 TERMINATED
+                      </span>
+                    ) : (
+                      <span
+                        className={RISK_BADGE[a.riskLevel] || RISK_BADGE.low}
+                      >
+                        {(a.riskLevel || "low").toUpperCase()}
+                      </span>
+                    )}
                   </div>
-                  <span className={RISK_BADGE[a.riskLevel] || RISK_BADGE.low}>
-                    {(a.riskLevel || "low").toUpperCase()}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-400 mt-1.5">
-                  {a.validEventCount} valid event
-                  {a.validEventCount !== 1 ? "s" : ""}
-                </p>
-              </button>
-            ))}
+                  <p className="text-xs text-slate-400 mt-1.5">
+                    {a.validEventCount} valid event
+                    {a.validEventCount !== 1 ? "s" : ""}
+                    {isTerminated && a.terminatedReason && (
+                      <span className="text-red-300/80">
+                        {" "}
+                        · {a.terminatedReason}
+                      </span>
+                    )}
+                  </p>
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -225,14 +271,42 @@ export default function ExamReview() {
             </div>
           ) : (
             <>
-              <div className="flex items-center justify-between mb-3">
+              {/* Selected student header */}
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                 <p className="font-semibold truncate">
                   {selected.attempt.student.name} — events
                 </p>
-                <span className="text-xs text-slate-500">
-                  {selected.events.length} total
-                </span>
+                <div className="flex items-center gap-2">
+                  {selected.attempt.status === "terminated" && (
+                    <span className="badge bg-red-500/20 text-red-300 border-red-500/50 text-[10px]">
+                      🚫 TERMINATED
+                    </span>
+                  )}
+                  <span className="text-xs text-slate-500">
+                    {selected.events.length} total
+                  </span>
+                </div>
               </div>
+
+              {/* 🔴 Terminated explanation banner */}
+              {selected.attempt.status === "terminated" && (
+                <div className="bg-red-500/10 border border-red-500/40 rounded-lg p-2.5 mb-2 text-xs text-red-200">
+                  <b>⚠️ Auto-terminated:</b>{" "}
+                  {selected.attempt.terminatedReason ||
+                    "Suspicious activity threshold exceeded"}
+                </div>
+              )}
+
+              {/* 🟡 Tuning hints */}
+              {tuningHints.length > 0 && (
+                <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-lg p-2.5 mb-2 text-xs text-yellow-200">
+                  💡 <b>Tuning suggestion:</b>{" "}
+                  {tuningHints
+                    .map((h) => `${h.label} (${h.falseRate}% false alarm)`)
+                    .join(", ")}{" "}
+                  — consider raising the threshold.
+                </div>
+              )}
 
               <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
                 {selected.events.length === 0 && (
@@ -262,7 +336,8 @@ export default function ExamReview() {
                       <img
                         src={fileUrl(ev.snapshot)}
                         alt="snapshot"
-                        className="mt-1 rounded-md max-h-32 border border-slate-700"
+                        title="Hover to unblur"
+                        className="mt-1 rounded-md max-h-32 border border-slate-700 blur-md hover:blur-0 transition-all cursor-help"
                       />
                     )}
 
@@ -288,7 +363,9 @@ export default function ExamReview() {
                         ✕ False Alarm
                       </button>
                       <span
-                        className={`ml-auto text-[10px] px-2 py-0.5 rounded-full font-medium ${REVIEW_STYLE[ev.review] || REVIEW_STYLE.pending}`}
+                        className={`ml-auto text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                          REVIEW_STYLE[ev.review] || REVIEW_STYLE.pending
+                        }`}
                       >
                         {ev.review}
                       </span>

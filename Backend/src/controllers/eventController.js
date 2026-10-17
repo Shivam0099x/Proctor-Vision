@@ -1,6 +1,13 @@
 import Event from "../models/Event.js";
 import Attempt from "../models/Attempt.js";
 
+// Auto-termination rule: N valid events within a rolling window → terminate
+const TERMINATE_THRESHOLD = 6;               // events
+const TERMINATE_WINDOW_MS = 5 * 60 * 1000;   // 5 minutes
+
+const computeRisk = (validCount) =>
+  validCount >= 6 ? "high" : validCount >= 3 ? "medium" : "low";
+
 // Student: post event (optionally with snapshot file)
 // Content-Type: multipart/form-data (field "snapshot") OR JSON with base64
 export const createEvent = async (req, res) => {
@@ -13,8 +20,8 @@ export const createEvent = async (req, res) => {
     if (!attempt) return res.status(404).json({ message: "Attempt not found" });
     if (attempt.student.toString() !== req.user._id.toString())
       return res.status(403).json({ message: "Forbidden" });
-    if (attempt.status === "submitted")
-      return res.status(400).json({ message: "Attempt already submitted" });
+    if (attempt.status === "submitted" || attempt.status === "terminated")
+      return res.status(400).json({ message: `Attempt already ${attempt.status}` });
 
     let snapshot = null;
     if (req.file) snapshot = `/uploads/${req.file.filename}`;
@@ -27,16 +34,41 @@ export const createEvent = async (req, res) => {
       snapshot,
     });
 
-    // Update attempt risk on the fly
-    const validCount = await Event.countDocuments({
+    // --- Risk level recompute (existing behavior) ---
+    const totalValid = await Event.countDocuments({
       attempt: attempt._id,
       review: { $ne: "false_alarm" },
     });
-    attempt.riskLevel =
-      validCount >= 6 ? "high" : validCount >= 3 ? "medium" : "low";
+    attempt.riskLevel = computeRisk(totalValid);
+
+    // --- 🔴 AUTO-TERMINATE: 6+ valid events in rolling 5-min window ---
+    const windowStart = new Date(Date.now() - TERMINATE_WINDOW_MS);
+    const recentValid = await Event.countDocuments({
+      attempt: attempt._id,
+      review: { $ne: "false_alarm" },
+      timestamp: { $gte: windowStart },
+    });
+
+    let terminated = false;
+    if (recentValid >= TERMINATE_THRESHOLD && attempt.status === "active") {
+      attempt.status = "terminated";
+      attempt.riskLevel = "high";
+      attempt.submittedAt = new Date();
+      attempt.terminatedReason = `${recentValid} valid events within ${
+        TERMINATE_WINDOW_MS / 60000
+      } min`;
+      terminated = true;
+    }
+
     await attempt.save();
 
-    res.status(201).json(event);
+    // Return event + flags the frontend can act on
+    res.status(201).json({
+      ...event.toObject(),
+      attemptTerminated: terminated,
+      attemptStatus: attempt.status,
+      recentValidCount: recentValid,
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -56,14 +88,14 @@ export const reviewEvent = async (req, res) => {
     );
     if (!event) return res.status(404).json({ message: "Event not found" });
 
-    // Recompute attempt risk
+    // Recompute attempt risk (existing behavior)
     const validCount = await Event.countDocuments({
       attempt: event.attempt,
       review: { $ne: "false_alarm" },
     });
-    const riskLevel =
-      validCount >= 6 ? "high" : validCount >= 3 ? "medium" : "low";
-    await Attempt.findByIdAndUpdate(event.attempt, { riskLevel });
+    await Attempt.findByIdAndUpdate(event.attempt, {
+      riskLevel: computeRisk(validCount),
+    });
 
     res.json(event);
   } catch (err) {
